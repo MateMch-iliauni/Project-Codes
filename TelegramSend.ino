@@ -2,11 +2,11 @@
 #include <WiFiClientSecure.h>
 #include <UniversalTelegramBot.h>
 
-const char* ssid     = "WiFi-Library";
-const char* password = "Lib#5000";
+const char* ssid     = "WiFi-SSID";
+const char* password = "Password";
 
-String botToken = "8246050107:AAFI_w4DhH-yXu3kZ-zhFXqIa8TrfUf8QQs";
-String chatId   = "1991136887";
+String botToken = "Telegram_BotToken";
+String chatId   = "Telegram_chatId";
 
 WiFiClientSecure client;
 UniversalTelegramBot bot(botToken, client);
