@@ -14,22 +14,10 @@
 // USER-CONFIGURABLE PARAMETERS
 // ──────────────────────────────────────────────────────────────
 
-// Temperature above which the system considers fire to be present (°C)
 const float FIRE_CONFIRM_TEMP        = 40.0f;
-
-// Temperature below which the system considers the fire to be lost (°C)
-// Must be lower than FIRE_CONFIRM_TEMP
 const float FIRE_LOST_TEMP           = 35.0f;
-
-// How many consecutive cold frames are required before triggering the alarm.
-// At MLX90640_2_HZ, each frame is ~0.5 s, so 3 frames ≈ 1.5 s.
-// Increase to reduce sensitivity to brief cold glitches / drafts.
 const int   COLD_FRAMES_REQUIRED     = 3;
-
-// Interval between repeated alarm beeps / Telegram messages (ms)
 const unsigned long BEEP_INTERVAL_MS = 10000UL;
-
-// Duration of each buzzer beep (ms)
 const unsigned long BEEP_DURATION_MS = 500UL;
 
 const char* TELEGRAM_BOT_TOKEN       = "7655520460:AAG239a4LqNq0acoINI3Pn9RyacG_6AhRUc";
@@ -40,17 +28,17 @@ String      TELEGRAM_CHAT_ID         = "8154736889";
 // ──────────────────────────────────────────────────────────────
 
 const int BUZZER_PIN = 4;
-const int BUTTON_PIN = 5;   // wire button between GPIO 5 and GND
+const int BUTTON_PIN = 5;
 
 // ──────────────────────────────────────────────────────────────
 // SYSTEM STATES
 // ──────────────────────────────────────────────────────────────
 
 enum SystemState {
-    STATE_IDLE,         // Waiting; monitoring disabled (button not yet pressed)
-    STATE_MONITORING,   // Monitoring but no fire seen yet
-    STATE_FIRE_ACTIVE,  // Fire confirmed (temp was above FIRE_CONFIRM_TEMP)
-    STATE_ALARM         // Fire-loss alarm is sounding
+    STATE_IDLE,
+    STATE_MONITORING,
+    STATE_FIRE_ACTIVE,
+    STATE_ALARM
 };
 
 SystemState currentState = STATE_IDLE;
@@ -62,19 +50,16 @@ SystemState currentState = STATE_IDLE;
 Adafruit_MLX90640 mlx;
 float frame[32 * 24];
 
-int           coldFrameCount = 0;         // consecutive frames below FIRE_LOST_TEMP
-unsigned long lastAlertTime  = 0;         // last time buzzer / Telegram fired
+int           coldFrameCount  = 0;
+unsigned long lastAlertTime   = 0;
 
-// ── Non-blocking buzzer ──────────────────────────────────────
 bool          buzzerActive    = false;
 unsigned long buzzerStartTime = 0;
 
-// ── Button debounce ──────────────────────────────────────────
-// Initialised from actual GPIO in setup() to avoid a spurious edge on first call
-int           lastRawButton      = HIGH;
-int           confirmedButton    = HIGH;
-unsigned long lastDebounceTime   = 0;
-const unsigned long DEBOUNCE_MS  = 50;
+int           lastRawButton   = HIGH;
+int           confirmedButton = HIGH;
+unsigned long lastDebounceTime = 0;
+const unsigned long DEBOUNCE_MS = 50;
 
 WiFiClientSecure     secureClient;
 UniversalTelegramBot telegramBot(TELEGRAM_BOT_TOKEN, secureClient);
@@ -83,12 +68,13 @@ UniversalTelegramBot telegramBot(TELEGRAM_BOT_TOKEN, secureClient);
 // FORWARD DECLARATIONS
 // ──────────────────────────────────────────────────────────────
 
-void        setupWiFi();
-void        sendTelegramAlert(float maxTemp);
-void        startBuzzer();
-void        updateBuzzer();
-float       getMaxTemperature();
-bool        handleButton();   // returns true once per confirmed press
+void  setupWiFi();
+void  sendTelegramAlert(float maxTemp);
+void  startBuzzer();
+void  stopBuzzer();
+void  updateBuzzer();
+float getMaxTemperature();
+bool  handleButton();
 
 // ──────────────────────────────────────────────────────────────
 // SETUP
@@ -101,8 +87,6 @@ void setup() {
 
     pinMode(BUZZER_PIN, OUTPUT);
     digitalWrite(BUZZER_PIN, LOW);
-
-    // Button: one leg → GPIO 5, other leg → GND (internal pull-up used)
     pinMode(BUTTON_PIN, INPUT_PULLUP);
 
     Wire.begin();
@@ -117,11 +101,10 @@ void setup() {
     Serial.printf("     Fire lost edge: < %.1f°C (for %d consecutive frames)\n",
                   FIRE_LOST_TEMP, COLD_FRAMES_REQUIRED);
 
-    // Seed debounce state from real GPIO so the first call sees no spurious edge
     lastRawButton   = digitalRead(BUTTON_PIN);
     confirmedButton = lastRawButton;
 
-    secureClient.setInsecure();   // must be set before any TLS handshake
+    secureClient.setInsecure();
     setupWiFi();
 
     Serial.println("[OK] Setup complete. Press the button to begin monitoring.");
@@ -132,33 +115,43 @@ void setup() {
 // ──────────────────────────────────────────────────────────────
 
 void loop() {
-    updateBuzzer();              // service non-blocking buzzer every iteration
-    bool buttonPressed = handleButton();
+    // 1. Service the non-blocking buzzer first
+    updateBuzzer();
 
-    // ── Button toggles between IDLE/ALARM → MONITORING and MONITORING/FIRE_ACTIVE → IDLE ──
+    // 2. Check for a button press — button always has final say
+    bool buttonPressed = handleButton();
     if (buttonPressed) {
-        buzzerActive = false;
-        digitalWrite(BUZZER_PIN, LOW);
-        if (currentState == STATE_IDLE || currentState == STATE_ALARM) {
+        stopBuzzer();
+        // If idle -> start monitoring
+        if (currentState == STATE_IDLE) {
+
             currentState   = STATE_MONITORING;
             coldFrameCount = 0;
             lastAlertTime  = 0;
+
             Serial.println("[BUTTON] Monitoring STARTED.");
-        } else {
-            // STATE_MONITORING or STATE_FIRE_ACTIVE
+        }
+
+        // Any other state -> stop everything
+        else {
+
             currentState   = STATE_IDLE;
             coldFrameCount = 0;
-            Serial.println("[BUTTON] Monitoring STOPPED. System idle.");
+            lastAlertTime  = 0;
+
+            Serial.println("[BUTTON] System STOPPED.");
         }
+
+        return;
     }
 
-    // ── Nothing to do while idle ──────────────────────────────
+    // 3. Nothing to do while idle
     if (currentState == STATE_IDLE) {
         delay(100);
         return;
     }
 
-    // ── Read sensor frame ────────────────────────────────────
+    // 4. Read sensor frame
     if (mlx.getFrame(frame) != 0) {
         Serial.println("[WARN] Frame read failed – retrying.");
         delay(200);
@@ -171,33 +164,33 @@ void loop() {
                   currentState == STATE_MONITORING  ? "MONITORING"  :
                   currentState == STATE_FIRE_ACTIVE ? "FIRE_ACTIVE" : "ALARM");
 
-    // ── State machine ────────────────────────────────────────
+    // 5. State machine
     switch (currentState) {
 
-        // ── Waiting for fire to appear ───────────────────────
         case STATE_MONITORING:
             if (maxTemp > FIRE_CONFIRM_TEMP) {
                 currentState   = STATE_FIRE_ACTIVE;
                 coldFrameCount = 0;
-                Serial.printf("[EVENT] Fire confirmed at %.2f°C – now watching for drop.\n", maxTemp);
+                Serial.printf("[EVENT] Fire confirmed at %.2f°C – watching for drop.\n", maxTemp);
             }
             break;
 
-        // ── Fire is present; watch for a sustained cold drop ─
         case STATE_FIRE_ACTIVE:
             if (maxTemp < FIRE_LOST_TEMP) {
                 coldFrameCount++;
                 Serial.printf("[EVENT] Cold frame %d / %d (%.2f°C < %.1f°C)\n",
-                              coldFrameCount, COLD_FRAMES_REQUIRED,
-                              maxTemp, FIRE_LOST_TEMP);
+                              coldFrameCount, COLD_FRAMES_REQUIRED, maxTemp, FIRE_LOST_TEMP);
 
                 if (coldFrameCount >= COLD_FRAMES_REQUIRED) {
                     currentState  = STATE_ALARM;
-                    lastAlertTime = 0;   // force immediate first alarm
-                    Serial.printf("[ALARM] Fire loss detected! Temp dropped to %.2f°C\n", maxTemp);
+                    // Use millis() here — NOT 0 — so the first beep fires after
+                    // one full BEEP_INTERVAL_MS, not immediately on the next loop tick
+                    lastAlertTime = millis();
+                    startBuzzer();                  // trigger the very first beep right now
+                    sendTelegramAlert(maxTemp);     // and the very first notification
+                    Serial.printf("[ALARM] Fire loss detected! Temp: %.2f°C\n", maxTemp);
                 }
             } else {
-                // Temperature is still warm – reset cold-frame counter
                 if (coldFrameCount > 0) {
                     Serial.println("[EVENT] Temp recovered – cold-frame counter reset.");
                     coldFrameCount = 0;
@@ -205,7 +198,6 @@ void loop() {
             }
             break;
 
-        // ── Alarm: beep + notify repeatedly until button press ─
         case STATE_ALARM: {
             unsigned long now = millis();
             if (now - lastAlertTime >= BEEP_INTERVAL_MS) {
@@ -230,19 +222,16 @@ void loop() {
 bool handleButton() {
     int rawReading = digitalRead(BUTTON_PIN);
 
-    // Restart debounce timer whenever the raw signal changes
     if (rawReading != lastRawButton) {
         lastDebounceTime = millis();
         lastRawButton    = rawReading;
     }
 
-    // Signal has been stable long enough → accept it
     if ((millis() - lastDebounceTime) >= DEBOUNCE_MS) {
         if (rawReading != confirmedButton) {
             confirmedButton = rawReading;
-            // We only care about the falling edge (button pressed, not released)
             if (confirmedButton == LOW) {
-                return true;   // one clean press event
+                return true;
             }
         }
     }
@@ -263,22 +252,25 @@ float getMaxTemperature() {
 }
 
 // ──────────────────────────────────────────────────────────────
-// Non-blocking buzzer – call startBuzzer() to begin a beep,
-// then call updateBuzzer() every loop iteration to stop it.
-// This keeps the button responsive during a beep.
+// Non-blocking buzzer
 // ──────────────────────────────────────────────────────────────
 
 void startBuzzer() {
-    Serial.println("[BUZZER] Beep!");
+    Serial.println("[BUZZER] Beep start.");
     digitalWrite(BUZZER_PIN, HIGH);
     buzzerActive    = true;
     buzzerStartTime = millis();
 }
 
+void stopBuzzer() {
+    digitalWrite(BUZZER_PIN, LOW);
+    buzzerActive = false;
+}
+
 void updateBuzzer() {
     if (buzzerActive && (millis() - buzzerStartTime >= BEEP_DURATION_MS)) {
-        digitalWrite(BUZZER_PIN, LOW);
-        buzzerActive = false;
+        stopBuzzer();
+        Serial.println("[BUZZER] Beep end.");
     }
 }
 
