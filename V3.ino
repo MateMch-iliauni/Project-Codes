@@ -21,8 +21,8 @@ const int   COLD_FRAMES_REQUIRED     = 3;
 const unsigned long BEEP_INTERVAL_MS = 10000UL;
 const unsigned long BEEP_DURATION_MS = 500UL;
 
-const char* TELEGRAM_BOT_TOKEN       = "YOUR_TOKEN_HERE";
-String      TELEGRAM_CHAT_ID         = "YOUR_CHAT_ID_HERE";
+const char* TELEGRAM_BOT_TOKEN       = "7655520460:AAG239a4LqNq0acoINI3Pn9RyacG_6AhRUc";
+String      TELEGRAM_CHAT_ID         = "8154736889";
 
 // ──────────────────────────────────────────────────────────────
 // PIN DEFINITIONS
