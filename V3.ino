@@ -1,9 +1,7 @@
 // ──────────────────────────────────────────────────────────────
 // Thermal Camera Fire-Loss Alarm System
 // ESP32 + MLX90640 + Buzzer + Button + Telegram
-// FIX: Telegram გაგზავნა გადატანილია ცალკე FreeRTOS Task-ში
-//      რათა loop() არ დაბლოკოს და ბაზერი/ღილაკი ყოველთვის
-//      რეაგირებდეს დროულად.
+// CLEAN: FreeRTOS Queue for sensor→loop communication
 // ──────────────────────────────────────────────────────────────
 
 #include <Wire.h>
@@ -23,8 +21,8 @@ const int   COLD_FRAMES_REQUIRED     = 3;
 const unsigned long BEEP_INTERVAL_MS = 10000UL;
 const unsigned long BEEP_DURATION_MS = 500UL;
 
-const char* TELEGRAM_BOT_TOKEN       = "7655520460:AAG239a4LqNq0acoINI3Pn9RyacG_6AhRUc";
-String      TELEGRAM_CHAT_ID         = "8154736889";
+const char* TELEGRAM_BOT_TOKEN       = "YOUR_TOKEN_HERE";
+String      TELEGRAM_CHAT_ID         = "YOUR_CHAT_ID_HERE";
 
 // ──────────────────────────────────────────────────────────────
 // PIN DEFINITIONS
@@ -44,11 +42,13 @@ enum SystemState {
     STATE_ALARM
 };
 
-SystemState currentState = STATE_IDLE;
+volatile SystemState currentState = STATE_IDLE;
 
 // ──────────────────────────────────────────────────────────────
-// FREERTOS — Telegram Task სინქრონიზაცია
+// FREERTOS
 // ──────────────────────────────────────────────────────────────
+
+QueueHandle_t tempQueue;
 
 volatile bool  sendAlertFlag = false;
 volatile float alertTemp     = 0.0f;
@@ -58,13 +58,12 @@ volatile float alertTemp     = 0.0f;
 // ──────────────────────────────────────────────────────────────
 
 Adafruit_MLX90640 mlx;
-float frame[32 * 24];
 
-int           coldFrameCount  = 0;
-unsigned long lastAlertTime   = 0;
+int           coldFrameCount   = 0;
+unsigned long lastAlertTime    = 0;
 
-bool          buzzerActive    = false;
-unsigned long buzzerStartTime = 0;
+bool          buzzerActive     = false;
+unsigned long buzzerStartTime  = 0;
 
 int           lastRawButton    = HIGH;
 int           confirmedButton  = HIGH;
@@ -80,12 +79,42 @@ void  triggerAlert(float maxTemp);
 void  startBuzzer();
 void  stopBuzzer();
 void  updateBuzzer();
-float getMaxTemperature();
 bool  handleButton();
 void  telegramTask(void* parameter);
+void  sensorTask(void* parameter);
 
 // ──────────────────────────────────────────────────────────────
-// FREERTOS TASK
+// SENSOR TASK — Core 1
+// ──────────────────────────────────────────────────────────────
+
+void sensorTask(void* parameter) {
+    static float frame[32 * 24];
+
+    while (true) {
+        if (currentState == STATE_IDLE) {
+            vTaskDelay(50 / portTICK_PERIOD_MS);
+            continue;
+        }
+
+        if (mlx.getFrame(frame) != 0) {
+            Serial.println("[SENSOR] Frame read failed – retrying.");
+            vTaskDelay(20 / portTICK_PERIOD_MS);
+            continue;
+        }
+
+        float maxT = frame[0];
+        for (int i = 1; i < 32 * 24; i++) {
+            if (frame[i] > maxT) maxT = frame[i];
+        }
+
+        xQueueOverwrite(tempQueue, &maxT);
+
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
+// TELEGRAM TASK — Core 1
 // ──────────────────────────────────────────────────────────────
 
 void telegramTask(void* parameter) {
@@ -130,6 +159,8 @@ void setup() {
     digitalWrite(BUZZER_PIN, LOW);
     pinMode(BUTTON_PIN, INPUT_PULLUP);
 
+    tempQueue = xQueueCreate(1, sizeof(float));
+
     Wire.begin();
     Wire.setClock(400000);
     mlx.begin(MLX90640_I2CADDR_DEFAULT, &Wire);
@@ -147,21 +178,14 @@ void setup() {
 
     setupWiFi();
 
-    xTaskCreatePinnedToCore(
-        telegramTask,
-        "TelegramTask",
-        8192,
-        NULL,
-        1,
-        NULL,
-        0
-    );
+    xTaskCreatePinnedToCore(sensorTask,   "SensorTask",   8192, NULL, 2, NULL, 1);
+    xTaskCreatePinnedToCore(telegramTask, "TelegramTask", 12288, NULL, 1, NULL, 1);
 
     Serial.println("[OK] Setup complete. Press the button to begin monitoring.");
 }
 
 // ──────────────────────────────────────────────────────────────
-// MAIN LOOP
+// MAIN LOOP — Core 0, never blocks
 // ──────────────────────────────────────────────────────────────
 
 void loop() {
@@ -192,18 +216,16 @@ void loop() {
     }
 
     if (currentState == STATE_IDLE) {
-        delay(10);
+        delay(5);
         return;
     }
 
-    yield();
-    if (mlx.getFrame(frame) != 0) {
-        Serial.println("[WARN] Frame read failed – retrying.");
-        delay(20);
+    float maxTemp;
+    if (xQueueReceive(tempQueue, &maxTemp, 0) != pdTRUE) {
+        delay(5);
         return;
     }
 
-    float maxTemp = getMaxTemperature();
     Serial.printf("[TEMP] Max: %.2f°C  |  State: %s\n",
                   maxTemp,
                   currentState == STATE_MONITORING  ? "MONITORING"  :
@@ -250,15 +272,14 @@ void loop() {
             break;
         }
 
-        default:
-            break;
+        default: break;
     }
 
-    delay(20);
+    delay(5);
 }
 
 // ──────────────────────────────────────────────────────────────
-// triggerAlert — Task-ს ეუბნება გაგზავნოს
+// triggerAlert
 // ──────────────────────────────────────────────────────────────
 
 void triggerAlert(float maxTemp) {
@@ -288,18 +309,6 @@ bool handleButton() {
     }
 
     return false;
-}
-
-// ──────────────────────────────────────────────────────────────
-// მაქსიმალური ტემპერატურა
-// ──────────────────────────────────────────────────────────────
-
-float getMaxTemperature() {
-    float maxT = frame[0];
-    for (int i = 1; i < 32 * 24; i++) {
-        if (frame[i] > maxT) maxT = frame[i];
-    }
-    return maxT;
 }
 
 // ──────────────────────────────────────────────────────────────
