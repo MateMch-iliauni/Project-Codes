@@ -1,9 +1,3 @@
-// ──────────────────────────────────────────────────────────────
-// Thermal Camera Fire-Loss Alarm System
-// ESP32 + MLX90640 + Buzzer + Button + Telegram
-// TARGET: Gas stove monitoring
-// ──────────────────────────────────────────────────────────────
-
 #include <Wire.h>
 #include <Adafruit_MLX90640.h>
 #include <WiFiManager.h>
@@ -12,24 +6,18 @@
 #include <ArduinoJson.h>
 
 // ──────────────────────────────────────────────────────────────
-// THRESHOLDS — tuned for gas stove monitoring
+// THRESHOLDS
 // ──────────────────────────────────────────────────────────────
 
-// Stove OFF = ~25-35°C. Fire triggers above this fixed value.
-const float FIRE_ON_THRESHOLD  = 80.0f;   // °C — flame detected above this
+const float FIRE_ON_THRESHOLD  = 80.0f;
 
-// Flame just went out — stove starts cooling rapidly.
-// 80°C is well above idle but clearly below active flame.
-const float FIRE_OFF_THRESHOLD = 55.0f;   // °C — fire considered lost below this
+const float FIRE_OFF_THRESHOLD = 55.0f;
 
-// How many consecutive cold frames before alarm fires.
-// At 2Hz sensor rate: 5 frames = ~2.5 seconds confirmation.
+
 const int COLD_FRAMES_REQUIRED = 8;
 
-// Cooling rate detection — catches slow-cooling cookware (e.g. frying pans).
-// At 2Hz: 12 frames = ~6 seconds of sustained cooling trend.
 const int   COOLING_FRAMES_REQUIRED  = 18;
-const float COOLING_DELTA_THRESHOLD  = -0.3f;  // °C/frame — drop this much to count
+const float COOLING_DELTA_THRESHOLD  = -0.3f;
 
 const unsigned long BEEP_INTERVAL_MS = 10000UL;
 const unsigned long BEEP_DURATION_MS = 500UL;
@@ -95,7 +83,6 @@ unsigned long lastDebounceTime = 0;
 const unsigned long DEBOUNCE_MS = 20;
 float peakTemp = 0;
 
-// Cooling rate detection state
 float previousTemp  = 0.0f;
 int   coolingFrames = 0;
 
@@ -129,7 +116,6 @@ void setup() {
     tempQueue  = xQueueCreate(1, sizeof(float));
     alertQueue = xQueueCreate(1, sizeof(AlertData));
 
-    // I2C bus recovery
     Serial.println("[HARDWARE] Clearing potentially locked I2C bus...");
     pinMode(I2C_SDA, INPUT_PULLUP);
     pinMode(I2C_SCL, OUTPUT);
@@ -146,7 +132,6 @@ void setup() {
     Wire.begin();
     Wire.setClock(400000);
 
-    // MLX90640 FM+ mode enable
     Wire.beginTransmission(0x33);
     Wire.write(0x80); 
     Wire.write(0x0D);
@@ -201,7 +186,6 @@ void loop() {
         xQueueReset(tempQueue);
         xQueueReset(alertQueue);
 
-        // Reset cooling rate detection on return to idle
         if (next == STATE_IDLE) {
             previousTemp  = 0.0f;
             coolingFrames = 0;
@@ -228,7 +212,6 @@ void loop() {
 
     switch (getState()) {
 
-        // Waiting for flame to appear
         case STATE_MONITORING: {
             Serial.printf("[MONITOR] Max: %.1f°C | Fire trigger: %.0f°C\n",
                           maxTemp, FIRE_ON_THRESHOLD);
@@ -245,11 +228,9 @@ void loop() {
             break;
         }
 
-        // Flame is active — watching for it to go out
         case STATE_FIRE_ACTIVE: {
             if (maxTemp > peakTemp) peakTemp = maxTemp;
 
-            // — Cooling rate detection —
             float delta = maxTemp - previousTemp;
 
             if (delta <= COOLING_DELTA_THRESHOLD) {
@@ -265,7 +246,6 @@ void loop() {
                           coldFrameCount, COLD_FRAMES_REQUIRED,
                           coolingFrames,  COOLING_FRAMES_REQUIRED);
 
-            // Primary flame-loss condition: absolute temperature drop
             if (maxTemp < FIRE_OFF_THRESHOLD) {
                 coldFrameCount++;
                 if (coldFrameCount >= COLD_FRAMES_REQUIRED) {
@@ -276,14 +256,12 @@ void loop() {
                     Serial.printf("[ALARM] Flame gone! Temp dropped to %.1f°C\n", maxTemp);
                 }
             } else {
-                // Temp still high — reset counter
                 if (coldFrameCount > 0) {
                     Serial.println("[EVENT] Still hot — cold frame counter reset.");
                     coldFrameCount = 0;
                 }
             }
 
-            // Secondary flame-loss condition: sustained cooling rate (e.g. thick cookware)
             if (coolingFrames >= COOLING_FRAMES_REQUIRED) {
                 setState(STATE_ALARM);
                 lastAlertTime = millis();
@@ -296,7 +274,6 @@ void loop() {
             break;
         }
 
-        // Alarm running — repeat alert every 10 seconds
         case STATE_ALARM: {
             unsigned long now = millis();
             if (now - lastAlertTime >= BEEP_INTERVAL_MS) {
