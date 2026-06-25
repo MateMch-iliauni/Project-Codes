@@ -16,8 +16,8 @@ const float FIRE_OFF_THRESHOLD = 55.0f;
 
 const int COLD_FRAMES_REQUIRED = 8;
 
-const int   COOLING_FRAMES_REQUIRED  = 18;
-const float COOLING_DELTA_THRESHOLD  = -0.3f;
+const int   COOLING_FRAMES_REQUIRED  = 10;
+const float COOLING_DELTA_THRESHOLD  = -0.2f;
 
 const unsigned long BEEP_INTERVAL_MS = 10000UL;
 const unsigned long BEEP_DURATION_MS = 500UL;
